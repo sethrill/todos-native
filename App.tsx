@@ -12,36 +12,32 @@ function delay(ms: number): Promise<number> {
   );
 }
 
-// async function twoP() {
-//   let net = delay(1000);
-//   let db = delay(2000);
-//   db.then(r => { if(!state) setState() });
-//   net.then(r => { setState(), saveToDb() });
+// function sum(a: number, b: number){
+//   return a + b;
+// }
+// function createSumBy(a: number) {
+//   return {
+//     x: (b: number) => sum(a, b),
+//     y: (b: number) => sum(a * 2, b * 2),
+//   }
 // }
 
-async function getLocalToDos(filter: { title?: string }) {
-  return new Promise<any[]>((resolve, reject) => {
-    const db = SQLite.openDatabase('api');
-    db.transaction(tx => {
-      tx.executeSql(`select * from todos`, [], (transaction, resultSet: any) => {
-        if (filter.title !== '') {
-          let result: ITodo[] = [...resultSet.rows];
-          result = result.filter(todo => todo.title.includes(filter.title));
-          resolve(result);
-        }
-        resolve([...resultSet.rows]);
-      }, (trasaction, err): any => reject(err));
-    });
-  });
+
+// let { x, y } = createSumBy(10);
+// let s = s10.x(1);
+// let s1 = s10.y(2)
+// let { x: xx, y: yy} = createSumBy(100);
+
+
+function filterData(data: ITodo[], filter: { title?: string }) {
+  return data.filter(item => item.title.includes(filter.title))
 }
 
-
-async function getTodos(filter: { title?: string }) {
-  const response = await fetch('http://localhost:4000/api/todo');
+async function getTodos(filter: { title?: string }, tableName: string) {
+  const response = await fetch('http://localhost:4000/api/todo?tableName=' + tableName);
   let data = await response.json() as ITodo[];
   if (filter.title !== '') {
-    const result: ITodo[] = data.filter(todo => todo.title.includes(filter.title));
-    return result;
+    return filterData(data, filter);
   }
   return data;
 }
@@ -51,24 +47,6 @@ function useEffectAsync(fn: () => Promise<void>, deps: any[]) {
   useEffect(() => {
     fn();
   }, deps);
-}
-
-async function setLocalTodos(data: ITodo[]) {
-  return new Promise<void>((resolve, reject) => {
-    const db = SQLite.openDatabase('api');
-    db.transaction(tx => {
-      tx.executeSql(`delete from todos`, [], (transaction, resultSet) => console.log("data deleted"), (trasaction, err): any => console.log(err));
-      data.forEach(item => {
-        tx.executeSql(
-          `insert into todos (id, title, description, completed, date) values (?, ?, ?, ?, ?);`
-          , [item.id, item.title, item.description, item.completed, item.date]
-          , (transaction, resultSet) => console.log('we made it', resultSet)
-          , (transaction, err): any => console.log(err)
-        );
-      });
-      tx.executeSql(`select * from todos`, [], (transaction, resultSet) => console.log(resultSet.rows), (trasaction, err): any => console.log(err));
-    }, reject, () => resolve(null));
-  });
 }
 
 function useData<T>({ loader, localLoader, localDataSetter, deps }: {
@@ -102,12 +80,63 @@ function useData<T>({ loader, localLoader, localDataSetter, deps }: {
   return { items, loading, errorMessage };
 }
 
+
+
+
+function createSqlFunction(tableName: string, columns: Record<string, string>) {
+  return {
+    getLocal: async function getLocalTodos(filter: Record<string, string>) {
+      return new Promise<any[]>((resolve, reject) => {
+        const db = SQLite.openDatabase('api');
+        db.transaction(tx => {
+          const keys = Object.keys(filter);
+          let query = filter[keys[0]] === '' ? `select * from ${tableName}` : `select * from ${tableName} where ${keys[0]} like '%${filter[keys[0]]}%'`;
+          tx.executeSql(query, [], (transaction, resultSet: any) => {
+            resolve([...resultSet.rows]);
+          }, (trasaction, err): any => reject(err));
+        });
+      });
+    }, setLocal: async function setLocalTodos(data: ITodo[]) {
+      return new Promise<void>((resolve, reject) => {
+        const db = SQLite.openDatabase('api');
+        db.transaction(tx => {
+          tx.executeSql(`delete from ${tableName}`, [], (transaction, resultSet) => console.log("data deleted"), (trasaction, err): any => console.log(err));
+          let keys = Object.keys(columns);
+          data.forEach(item => {
+            let itemArray = [];
+            let partialQuery = '';
+            for (let i = 0; i < keys.length; i++) {
+              itemArray.push(item[keys[i]]);
+              partialQuery = i === keys.length - 1 ? partialQuery + '?' : partialQuery + '?, ';
+            }
+            tx.executeSql(
+              `insert into ${tableName} (${keys.join(', ')}) values (${partialQuery});`
+              , itemArray
+              , (transaction, resultSet) => console.log('we made it', resultSet)
+              , (transaction, err): any => console.log(err)
+            );
+          });
+          tx.executeSql(`select * from todos`, [], (transaction, resultSet) => console.log(resultSet.rows), (trasaction, err): any => console.log(err));
+        }, reject, () => resolve(null));
+      });
+    }
+  }
+}
+
+const { getLocal, setLocal } = createSqlFunction("todos", {
+  "id": "number",
+  "title": "string",
+  "description": "string",
+  "completed": "bit",
+  "date": "date"
+})
+
 function App() {
   const [filterTitle, setFilterTitle] = useState("");
   const { items, loading, errorMessage } = useData({
-    loader: () => getTodos({ title: filterTitle }),
-    localLoader: () => getLocalToDos({ title: filterTitle }),
-    localDataSetter: setLocalTodos,
+    loader: () => getTodos({ title: filterTitle }, 'todos'),
+    localLoader: () => getLocal({ title: filterTitle }),
+    localDataSetter: setLocal,
     deps: [filterTitle]
   });
   return (
