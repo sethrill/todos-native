@@ -22,22 +22,6 @@ function delay(ms: number): Promise<number> {
   );
 }
 
-// function sum(a: number, b: number){
-//   return a + b;
-// }
-// function createSumBy(a: number) {
-//   return {
-//     x: (b: number) => sum(a, b),
-//     y: (b: number) => sum(a * 2, b * 2),
-//   }
-// }
-
-
-// let { x, y } = createSumBy(10);
-// let s = s10.x(1);
-// let s1 = s10.y(2)
-// let { x: xx, y: yy} = createSumBy(100);
-
 
 function filterData(data: ITodo[], filter: { title?: string }) {
   return data.filter(item => item.title.includes(filter.title))
@@ -112,8 +96,16 @@ function insertMockTableData(columnsKeys: any, columns: Record<string, string>, 
   }, (trasaction, err): any => console.log(err));
 }
 
+type SqlObj<T> = {} & {
+  [P in keyof T]: 
+    T[P] extends "number" ? number : 
+    T[P] extends "string" ? string : 
+    T[P] extends "bit" ? 1 | 0 : 
+    T[P] extends "date" ? Date : 
+    unknown
+}
 
-function createSqlFunction(tableName: string, columns: Record<string, string>) {
+function createSqlFunction<C extends Record<string, V>, V extends string>(tableName: string, columns: C) {
   // Move all query string creation here
   // Code to create table!
   const db = SQLite.openDatabase('api');
@@ -130,8 +122,8 @@ function createSqlFunction(tableName: string, columns: Record<string, string>) {
     setLocal
   };
 
-  async function getLocal(filter: Record<string, string>) {
-    return new Promise<any[]>((resolve, reject) => {
+  async function getLocal(filter: Partial<SqlObj<C>>) {
+    return new Promise<Array<SqlObj<C>>>((resolve, reject) => {
       db.transaction(tx => {
         tx.executeSql(`create table if not exists ${tableName} (${createLocalTablePartialQuery})`, [], (transaction, resultSet) => insertMockTableData(columnsKeys, columns, tx, tableName, setLocalQueryPartialQuery), (trasaction, err): any => console.log(err))
         const keys = Object.keys(filter);
@@ -148,7 +140,7 @@ function createSqlFunction(tableName: string, columns: Record<string, string>) {
       });
     });
   }
-  async function setLocal(data: Record<string, string>[]) {
+  async function setLocal(data: Array<SqlObj<C>>) {
     return new Promise<void>((resolve, reject) => {
       db.transaction(tx => {
         // TODO: Insert or updated don't delete
@@ -171,6 +163,9 @@ function createSqlFunction(tableName: string, columns: Record<string, string>) {
   }
 }
 
+
+type ITodo  = GetSqlObjFromGetLocal<typeof getLocal>
+type GetSqlObjFromGetLocal<T> = T extends (a: any) => Promise<Array<infer U>> ? U : never
 const { getLocal, setLocal } = createSqlFunction("todos", {
   "id": "number",
   "title": "string",
@@ -235,14 +230,18 @@ function updateData(item: any, tableName: string) {
 
 function EditData({ navigation, route }) {
   console.log(route.params)
-  let item = route.params.item;
+  let [item, setItem] = useState<ITodo>(route.params.item);
   const tableName = route.params.tableName;
 
   return (
     <View style={styles.container}>
       <Text style={{ fontSize: 35, marginBottom: 50 }}>Edit your data</Text>
-      <TextInput style={styles.inputBox} onChangeText={(event: any) => { item.title = event }}></TextInput>
-      <TextInput style={styles.inputBox} onChangeText={(event: any) => { item.description = event }} ></TextInput>
+      <TextInput style={styles.inputBox} 
+        value={item.title}
+        onChangeText={(event: any) => setItem({...item, title: event })}></TextInput>
+      <TextInput style={styles.inputBox} 
+        value={item.description}
+        onChangeText={(event: any) => setItem({...item, description: event })} ></TextInput>
       <Button
         title="Save changes"
         onPress={() => updateData(item, tableName)}
@@ -301,13 +300,5 @@ const styles = StyleSheet.create({
     justifyContent: 'space-around'
   }
 });
-
-interface ITodo {
-  completed: string;
-  date: string;
-  description: string;
-  id: number;
-  title: string;
-}
 
 export default App;
