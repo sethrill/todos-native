@@ -3,7 +3,7 @@ import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View, Modal, Button } from 'react-native';
 import * as SQLite from 'expo-sqlite';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, useIsFocused } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 const Stack = createStackNavigator();
 
@@ -13,14 +13,6 @@ const mockTableData = [
   { id: 1, title: 'test todo 3', description: 'test todo 3 description', completed: false, date: '09/12/2017' },
   { id: 1, title: 'test todo 4', description: 'test todo 4 description', completed: false, date: '24/09/2019' }
 ]
-
-function delay(ms: number): Promise<number> {
-  return new Promise<number>((resolve, reject) =>
-    setTimeout(() => {
-      resolve(10)
-    }, ms)
-  );
-}
 
 
 function filterData(data: ITodo[], filter: { title?: string }) {
@@ -56,11 +48,11 @@ function useData<T>({ loader, localLoader, localDataSetter, deps }: {
   useEffectAsync(async () => {
     setServerDataLoading(true);
     try {
-      // loader().then((res) => {
-      //   localDataSetter(res);
-      //   setItems(res);
-      //   setServerDataLoading(false);
-      // }, err => console.log(err));
+      loader().then((res) => {
+        localDataSetter(res);
+        setItems(res);
+        setServerDataLoading(false);
+      }, err => console.log(err));
       localLoader().then((res) => {
         if (serverDataLoading) {
           setItems(res);
@@ -74,35 +66,35 @@ function useData<T>({ loader, localLoader, localDataSetter, deps }: {
   return { items, loading, errorMessage };
 }
 
-function insertMockTableData(columnsKeys: any, columns: Record<string, string>, tx: any, tableName: string, setLocalQueryPartialQuery: string) {
-  tx.executeSql(`select * from ${tableName}`, [], (transaction, resultSet: any) => {
-    console.log(resultSet)
-    let tableData = [...resultSet.rows];
-    if (tableData.length === 0) {
-      mockTableData.forEach(item => {
-        let mockDataItemArray = [];
-        for (let i = 0; i < columnsKeys.length; i++) {
-          mockDataItemArray.push(item[columnsKeys[i]]);
-        }
-        console.log(columnsKeys[1])
-        tx.executeSql(
-          `insert into ${tableName} (${columnsKeys.join(', ')}) values (${setLocalQueryPartialQuery});`
-          , mockDataItemArray
-          , (transaction, resultSet) => console.log('we made it', resultSet)
-          , (transaction, err): any => console.log(err)
-        );
-      });
-    }
-  }, (trasaction, err): any => console.log(err));
-}
+// function insertMockTableData(columnsKeys: any, columns: Record<string, string>, tx: any, tableName: string, setLocalQueryPartialQuery: string) {
+//   tx.executeSql(`select * from ${tableName}`, [], (transaction, resultSet: any) => {
+//     console.log(resultSet)
+//     let tableData = [...resultSet.rows];
+//     if (tableData.length === 0) {
+//       mockTableData.forEach(item => {
+//         let mockDataItemArray = [];
+//         for (let i = 0; i < columnsKeys.length; i++) {
+//           mockDataItemArray.push(item[columnsKeys[i]]);
+//         }
+//         console.log(columnsKeys[1])
+//         tx.executeSql(
+//           `insert into ${tableName} (${columnsKeys.join(', ')}) values (${setLocalQueryPartialQuery});`
+//           , mockDataItemArray
+//           , (transaction, resultSet) => console.log('we made it', resultSet)
+//           , (transaction, err): any => console.log(err)
+//         );
+//       });
+//     }
+//   }, (trasaction, err): any => console.log(err));
+// }
 
 type SqlObj<T> = {} & {
-  [P in keyof T]: 
-    T[P] extends "number" ? number : 
-    T[P] extends "string" ? string : 
-    T[P] extends "bit" ? 1 | 0 : 
-    T[P] extends "date" ? Date : 
-    unknown
+  [P in keyof T]:
+  T[P] extends "number" ? number :
+  T[P] extends "string" ? string :
+  T[P] extends "bit" ? 1 | 0 :
+  T[P] extends "date" ? Date :
+  unknown
 }
 
 function createSqlFunction<C extends Record<string, V>, V extends string>(tableName: string, columns: C) {
@@ -125,7 +117,7 @@ function createSqlFunction<C extends Record<string, V>, V extends string>(tableN
   async function getLocal(filter: Partial<SqlObj<C>>) {
     return new Promise<Array<SqlObj<C>>>((resolve, reject) => {
       db.transaction(tx => {
-        tx.executeSql(`create table if not exists ${tableName} (${createLocalTablePartialQuery})`, [], (transaction, resultSet) => insertMockTableData(columnsKeys, columns, tx, tableName, setLocalQueryPartialQuery), (trasaction, err): any => console.log(err))
+        // tx.executeSql(`create table if not exists ${tableName} (${createLocalTablePartialQuery})`, [], (transaction, resultSet) => insertMockTableData(columnsKeys, columns, tx, tableName, setLocalQueryPartialQuery), (trasaction, err): any => console.log(err))
         const keys = Object.keys(filter);
         // ToDo Move code to create query outside in body of createSqlFunction
         let query = filter[keys[0]] === '' ? getLocalPartialQuery : `${getLocalPartialQuery} where ${keys[0]} like '%${filter[keys[0]]}%'`;
@@ -164,7 +156,7 @@ function createSqlFunction<C extends Record<string, V>, V extends string>(tableN
 }
 
 
-type ITodo  = GetSqlObjFromGetLocal<typeof getLocal>
+type ITodo = GetSqlObjFromGetLocal<typeof getLocal>
 type GetSqlObjFromGetLocal<T> = T extends (a: any) => Promise<Array<infer U>> ? U : never
 const { getLocal, setLocal } = createSqlFunction("todos", {
   "id": "number",
@@ -184,6 +176,75 @@ function DisplayData(props) {
   )
 }
 
+function updateLocalData(item: ITodo, tableName: string) {
+  return new Promise<void>((resolve, reject) => {
+    const db = SQLite.openDatabase('api');
+    const keys = Object.keys(item);
+    let partialQuery = '';
+    let itemArray = [];
+    console.log(keys.length)
+    keys.forEach((key, index) => {
+      if (index > 0) {
+        console.log(index)
+        partialQuery = index === keys.length - 1 ? partialQuery + `${keys[index]} = ?` : partialQuery + `${keys[index]} = ?, `
+        itemArray.push(item[key]);
+      }
+    });
+    db.transaction(tx => {
+      tx.executeSql(`update ${tableName} set ${partialQuery} where id = ${item.id}`, itemArray, (transaction, resultSet) => resolve(), (transaction, err): any => reject());
+    })
+  });
+}
+
+async function updateServerData(item: any, tableName: string) {
+  console.log(JSON.stringify(item))
+  const response = await fetch(`http://localhost:4000/api/todo/${item.id}`, {
+    method: "PUT",
+    body: JSON.stringify(item),
+    headers: {
+      "Content-type": "application/json",
+      'Accept': 'application/json'
+    }
+  });
+  console.log(response)
+  let data = await response.json();
+  return data;
+}
+
+function deleteData(id: number) {
+  deleteLocalData(id).then(res => console.log('deleted'));
+  deleteServerData(id).then(res => console.log(res));
+}
+
+function deleteLocalData(id: number) {
+  return new Promise<void>((resolve, reject) => {
+    const db = SQLite.openDatabase('api');
+    db.transaction(tx => {
+      tx.executeSql(`delete from todos where id = ?`, [id], (transaction, resultSet) => resolve(), (transaction, err): any => reject());
+    })
+  })
+}
+
+async function deleteServerData(id: number) {
+  const response = await fetch(`http://localhost:4000/api/todo/${id}`, { method: 'DELETE' });
+  console.log(response)
+  let data = await response.json();
+  return data;
+}
+
+async function createServerData(item, tableName: string) {
+  const response = await fetch(`http://localhost:4000/api/todo/`, {
+    method: "POST",
+    body: JSON.stringify(item),
+    headers: {
+      "Content-type": "application/json",
+      'Accept': 'application/json'
+    }
+  });
+  console.log(response)
+  let data = await response.json();
+  return data;
+}
 
 function Home({ navigation }) {
   const [filterTitle, setFilterTitle] = useState("");
@@ -193,9 +254,15 @@ function Home({ navigation }) {
     localDataSetter: setLocal,
     deps: [filterTitle]
   });
+
   return (
     <View style={styles.container}>
-      <TextInput style={styles.inputBox} placeholder="Filter todos by title" onChange={(event: any) => setFilterTitle(event.target.value)} />
+      <View style={styles.inputContainer}>
+        <TextInput style={styles.inputBox} placeholder="Filter todos by title" onChange={(event: any) => setFilterTitle(event.target.value)} />
+        <View style={styles.newDataButton}>
+          <Button title="Add new todo" onPress={() => navigation.navigate('AddData', { tableName: 'todos' })} />
+        </View>
+      </View>
       {items.length > 0 ? items.map((item, index) => {
         return (
           <View key={index + 'f'} style={styles.dataContainer}>
@@ -205,46 +272,65 @@ function Home({ navigation }) {
               title="Go to Details"
               onPress={() => navigation.navigate('EditData', { item: item, tableName: 'todos' })}
             />
+            <Button
+              key={index + 'b'}
+              title="Delete"
+              onPress={() => { deleteData(item.id) }} />
           </View>)
       }) : <Text>nothing is working!!!!</Text>}
     </View>
   );
 }
 
-function updateData(item: any, tableName: string) {
-  const db = SQLite.openDatabase('api');
-  const keys = Object.keys(item);
-  let partialQuery = '';
-  let itemArray = [];
-  keys.forEach((key, index) => {
-    if (index > 0) {
-      partialQuery = index === keys.length ? partialQuery + `${keys[index]} = ?` : partialQuery + `${keys[index]} = ?, `
-      itemArray.push(item[key]);
-    }
-  });
-  console.log(itemArray, partialQuery);
-  db.transaction(tx => {
-    tx.executeSql(`update ${tableName} set ${partialQuery} where id = ${item.id}`, itemArray, (transaction, resultSet) => console.log('updated'), (transaction, err): any => console.log(err));
-  })
+function AddData({ navigation, route }) {
+  let [item, setItem] = useState({ title: '', description: '', date: '', completed: false });
+  const createNewData = () => {
+    //createLocalData(item, tableName).then(() => { console.log("Updated local data") });
+    createServerData(item, route.params.tableName).then(res => console.log("Created server data ", res));
+  }
+  return (
+    <View style={styles.container}>
+      <Text style={{ fontSize: 35, marginBottom: 50 }}>Edit your data</Text>
+      <TextInput style={styles.inputBox}
+        value={item.title}
+        onChangeText={(event: any) => setItem({ ...item, title: event })}
+        placeholder='Title'></TextInput>
+      <TextInput style={styles.inputBox}
+        value={item.description}
+        onChangeText={(event: any) => setItem({ ...item, description: event })}
+        placeholder='Description'></TextInput>
+      <TextInput style={styles.inputBox}
+        value={item.date}
+        onChangeText={(event: any) => setItem({ ...item, date: event })}
+        placeholder='Date'></TextInput>
+      <Button
+        title="Save changes"
+        onPress={() => createNewData()}
+      />
+    </View>
+  )
 }
 
 function EditData({ navigation, route }) {
-  console.log(route.params)
   let [item, setItem] = useState<ITodo>(route.params.item);
   const tableName = route.params.tableName;
+  const updateData = () => {
+    updateLocalData(item, tableName).then(() => { console.log("Updated local data") });
+    updateServerData(item, tableName).then(res => console.log("Updated server data ", res));
+  }
 
   return (
     <View style={styles.container}>
       <Text style={{ fontSize: 35, marginBottom: 50 }}>Edit your data</Text>
-      <TextInput style={styles.inputBox} 
+      <TextInput style={styles.inputBox}
         value={item.title}
-        onChangeText={(event: any) => setItem({...item, title: event })}></TextInput>
-      <TextInput style={styles.inputBox} 
+        onChangeText={(event: any) => setItem({ ...item, title: event })}></TextInput>
+      <TextInput style={styles.inputBox}
         value={item.description}
-        onChangeText={(event: any) => setItem({...item, description: event })} ></TextInput>
+        onChangeText={(event: any) => setItem({ ...item, description: event })} ></TextInput>
       <Button
         title="Save changes"
-        onPress={() => updateData(item, tableName)}
+        onPress={() => updateData()}
       />
     </View>
   )
@@ -265,6 +351,7 @@ function App() {
           component={EditData}
           options={{ title: 'Edit Data' }}
         />
+        <Stack.Screen name="AddData" component={AddData} options={{ title: 'Add Data' }} />
       </Stack.Navigator>
     </NavigationContainer>
   );
@@ -277,12 +364,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 200
   },
+  inputContainer: {
+    width: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    marginBottom: 25
+  },
   inputBox: {
     marginBottom: 25,
     height: 25,
     width: '100%',
     borderColor: 'red',
     borderWidth: 1
+  },
+  newDataButton: {
+    width: '100%'
   },
   dataContainer: {
     borderWidth: 1,
