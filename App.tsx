@@ -58,6 +58,7 @@ function useData<T>({ loader, localLoader, localDataSetter, deps }: {
           setItems(res);
         }
       }, err => console.log(err));
+      // T: What loading ends here ? both local and server have not finised as they are in the promise 
       setLoading(false);
     } catch (e) {
       setErrorMessage("Error!");
@@ -96,7 +97,7 @@ type SqlObj<T> = {} & {
   T[P] extends "date" ? Date :
   unknown
 }
-
+// T: Move all sql stuff in here including insert/update/delete so we can cache common sql creation
 function createSqlFunction<C extends Record<string, V>, V extends string>(tableName: string, columns: C) {
   // Move all query string creation here
   // Code to create table!
@@ -117,6 +118,7 @@ function createSqlFunction<C extends Record<string, V>, V extends string>(tableN
   async function getLocal(filter: Partial<SqlObj<C>>) {
     return new Promise<Array<SqlObj<C>>>((resolve, reject) => {
       db.transaction(tx => {
+        // T: Whi is this commented out ?
         // tx.executeSql(`create table if not exists ${tableName} (${createLocalTablePartialQuery})`, [], (transaction, resultSet) => insertMockTableData(columnsKeys, columns, tx, tableName, setLocalQueryPartialQuery), (trasaction, err): any => console.log(err))
         const keys = Object.keys(filter);
         // ToDo Move code to create query outside in body of createSqlFunction
@@ -135,6 +137,7 @@ function createSqlFunction<C extends Record<string, V>, V extends string>(tableN
   async function setLocal(data: Array<SqlObj<C>>) {
     return new Promise<void>((resolve, reject) => {
       db.transaction(tx => {
+        // T: Still to do here 😋
         // TODO: Insert or updated don't delete
         tx.executeSql(`delete from ${tableName}`, [], (transaction, resultSet) => console.log("data deleted"), (trasaction, err): any => console.log(err));
         data.forEach(item => {
@@ -176,6 +179,7 @@ function DisplayData(props) {
   )
 }
 
+// T: we need some extra info here, about the last modified date, and if there are local changes that need to go to the server
 function updateLocalData(item: ITodo, tableName: string) {
   return new Promise<void>((resolve, reject) => {
     const db = SQLite.openDatabase('api');
@@ -211,11 +215,20 @@ async function updateServerData(item: any, tableName: string) {
   return data;
 }
 
+  // T: I this this should be a generic function we can create from the local change function and the server change function 
+  // Simialr for update, insert below
+  // The algo should be:
+  // 1: Mark the row as locally deleted (but do not actually delete)
+  // 2: Send delete to server
+  // 3: If the reqest succeded delete the row from the database
+  // 4: If the request failed, leave the row marked as deleted (we should have a global loop to send updates)
+  // Note, the promise the function returns should complete after the local data is updated, 
+  // so we don't keep the user wating
 function deleteData(id: number) {
   deleteLocalData(id).then(res => console.log('deleted'));
   deleteServerData(id).then(res => console.log(res));
 }
-
+// T: There need to be a way to track if a row is deleted locally but the request failed to get to the server
 function deleteLocalData(id: number) {
   return new Promise<void>((resolve, reject) => {
     const db = SQLite.openDatabase('api');
@@ -284,6 +297,14 @@ function Home({ navigation }) {
 
 function AddData({ navigation, route }) {
   let [item, setItem] = useState({ title: '', description: '', date: '', completed: false });
+  // T: I this this should be a generic function we can create from the local change function and the server change function 
+  // The algo should be:
+  // 1: Create the  row locally, with a temporary id (something negative should work)
+  // 2: Send insert to server
+  // 3: If the reqest succeded change the id to the new id returned by the server
+  // 4: If the request failed, leave the row with the temp id (we should have a global loop to send updates)
+  // Note, the promise the function returns should complete after the local data is updated, 
+  // so we don't keep the user wating
   const createNewData = () => {
     //createLocalData(item, tableName).then(() => { console.log("Updated local data") });
     createServerData(item, route.params.tableName).then(res => console.log("Created server data ", res));
@@ -314,6 +335,14 @@ function AddData({ navigation, route }) {
 function EditData({ navigation, route }) {
   let [item, setItem] = useState<ITodo>(route.params.item);
   const tableName = route.params.tableName;
+  // T: I this this should be a generic function we can create from the local change function and the server change function 
+  // The algo should be:
+  // 1: Update local data, and mark the row as locally changed
+  // 2: Send data so server
+  // 3: If the reqest succeded mark the row as having no local changes
+  // 4: If the request failed, leave the modified row in the database
+  // Note, the promise the function returns should complete after the local data is updated, 
+  // so we don't keep the user wating
   const updateData = () => {
     updateLocalData(item, tableName).then(() => { console.log("Updated local data") });
     updateServerData(item, tableName).then(res => console.log("Updated server data ", res));
