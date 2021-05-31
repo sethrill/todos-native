@@ -7,14 +7,6 @@ import { NavigationContainer, useIsFocused } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 const Stack = createStackNavigator();
 
-const mockTableData = [
-  { id: 1, title: 'test todo 1', description: 'test todo 1 description', completed: false, date: '12/03/2021' },
-  { id: 1, title: 'test todo 2', description: 'test todo 2 description', completed: false, date: '03/04/2021' },
-  { id: 1, title: 'test todo 3', description: 'test todo 3 description', completed: false, date: '09/12/2017' },
-  { id: 1, title: 'test todo 4', description: 'test todo 4 description', completed: false, date: '24/09/2019' }
-]
-
-
 function filterData(data: ITodo[], filter: { title?: string }) {
   return data.filter(item => item.title.includes(filter.title))
 }
@@ -66,28 +58,6 @@ function useData<T>({ loader, localLoader, localDataSetter, deps }: {
   }, deps);
   return { items, loading, errorMessage };
 }
-
-// function insertMockTableData(columnsKeys: any, columns: Record<string, string>, tx: any, tableName: string, setLocalQueryPartialQuery: string) {
-//   tx.executeSql(`select * from ${tableName}`, [], (transaction, resultSet: any) => {
-//     console.log(resultSet)
-//     let tableData = [...resultSet.rows];
-//     if (tableData.length === 0) {
-//       mockTableData.forEach(item => {
-//         let mockDataItemArray = [];
-//         for (let i = 0; i < columnsKeys.length; i++) {
-//           mockDataItemArray.push(item[columnsKeys[i]]);
-//         }
-//         console.log(columnsKeys[1])
-//         tx.executeSql(
-//           `insert into ${tableName} (${columnsKeys.join(', ')}) values (${setLocalQueryPartialQuery});`
-//           , mockDataItemArray
-//           , (transaction, resultSet) => console.log('we made it', resultSet)
-//           , (transaction, err): any => console.log(err)
-//         );
-//       });
-//     }
-//   }, (trasaction, err): any => console.log(err));
-// }
 
 type SqlObj<T> = {} & {
   [P in keyof T]:
@@ -190,10 +160,16 @@ function updateLocalData(item: ITodo, tableName: string) {
     keys.forEach((key, index) => {
       if (index > 0) {
         console.log(index)
-        partialQuery = index === keys.length - 1 ? partialQuery + `${keys[index]} = ?` : partialQuery + `${keys[index]} = ?, `
+        partialQuery = partialQuery + `${keys[index]} = ?, `
         itemArray.push(item[key]);
       }
     });
+    //the columns don't exist yet in the table;
+    //the modified column will be by default false but it will become true if changes are made and will be changed back to false once the changes are made on the server
+    partialQuery = partialQuery + 'modified = ?, ';
+    partialQuery = partialQuery + 'modifiedDate = ?';
+    itemArray.push(true);
+    itemArray.push('modified date placeholder');
     db.transaction(tx => {
       tx.executeSql(`update ${tableName} set ${partialQuery} where id = ${item.id}`, itemArray, (transaction, resultSet) => resolve(), (transaction, err): any => reject());
     })
@@ -215,25 +191,32 @@ async function updateServerData(item: any, tableName: string) {
   return data;
 }
 
-  // T: I this this should be a generic function we can create from the local change function and the server change function 
-  // Simialr for update, insert below
-  // The algo should be:
-  // 1: Mark the row as locally deleted (but do not actually delete)
-  // 2: Send delete to server
-  // 3: If the reqest succeded delete the row from the database
-  // 4: If the request failed, leave the row marked as deleted (we should have a global loop to send updates)
-  // Note, the promise the function returns should complete after the local data is updated, 
-  // so we don't keep the user wating
-function deleteData(id: number) {
-  deleteLocalData(id).then(res => console.log('deleted'));
-  deleteServerData(id).then(res => console.log(res));
-}
-// T: There need to be a way to track if a row is deleted locally but the request failed to get to the server
-function deleteLocalData(id: number) {
-  return new Promise<void>((resolve, reject) => {
+// T: I this this should be a generic function we can create from the local change function and the server change function 
+// Simialr for update, insert below
+// The algo should be:
+// 1: Mark the row as locally deleted (but do not actually delete)
+// 2: Send delete to server
+// 3: If the reqest succeded delete the row from the database
+// 4: If the request failed, leave the row marked as deleted (we should have a global loop to send updates)
+// Note, the promise the function returns should complete after the local data is updated, 
+// so we don't keep the user wating
+function deleteData(id: number, tableName: string) {
+  deleteLocalData(id, tableName).then(res => deleteServerData(id).then(res => {
+    console.log(res);
     const db = SQLite.openDatabase('api');
     db.transaction(tx => {
-      tx.executeSql(`delete from todos where id = ?`, [id], (transaction, resultSet) => resolve(), (transaction, err): any => reject());
+      tx.executeSql(`delete from ${tableName} where id = ?`, [res.row[0].id], (transaction, resultSet) => console.log('done'), (transaction, err): any => console.log(err));
+    })
+  }));
+}
+// T: There need to be a way to track if a row is deleted locally but the request failed to get to the server
+function deleteLocalData(id: number, tableName: string) {
+  return new Promise<void>((resolve, reject) => {
+    const db = SQLite.openDatabase('api');
+    //toBeDeleted will be a new column in the local db
+    //need to decide on the name for this column
+    db.transaction(tx => {
+      tx.executeSql(`update ${tableName} set toBeDeleted = ? where id = ?`, [true, id], (transaction, resultSet) => resolve(), (transaction, err): any => reject());
     })
   })
 }
@@ -259,6 +242,35 @@ async function createServerData(item, tableName: string) {
   return data;
 }
 
+function createLocalData(item, tableName: string) {
+  return new Promise<void>((resolve, reject) => {
+    const db = SQLite.openDatabase('api');
+    const keys = Object.keys(item);
+    keys.unshift('id');
+    keys.push('modified');
+    keys.push('modifiedDate')
+    let partialQuery = '';
+    let itemArray = [];
+    console.log(keys.length)
+    keys.forEach((key, index) => {
+      if (key === 'id') {
+        itemArray.push(-1);
+      } else if (key === 'modified') {
+        itemArray.push(false)
+      } else if (key === 'modifiedDate') {
+        itemArray.push('current date!!');
+      } else {
+        itemArray.push(item[key]);
+      }
+      partialQuery = index === keys.length - 1 ? partialQuery + '?' : partialQuery + '?, ';
+    });
+    console.log(partialQuery, itemArray, keys)
+    db.transaction(tx => {
+      tx.executeSql(`insert into ${tableName} (${keys.join(', ')}) values (${partialQuery})`, itemArray, (transaction, resultSet) => resolve(), (transaction, err): any => reject());
+    })
+  });
+}
+
 function Home({ navigation }) {
   const [filterTitle, setFilterTitle] = useState("");
   const { items, loading, errorMessage } = useData({
@@ -273,7 +285,7 @@ function Home({ navigation }) {
       <View style={styles.inputContainer}>
         <TextInput style={styles.inputBox} placeholder="Filter todos by title" onChange={(event: any) => setFilterTitle(event.target.value)} />
         <View style={styles.newDataButton}>
-          <Button title="Add new todo" onPress={() => navigation.navigate('AddData', { tableName: 'todos' })} />
+          <Button title="Add new todo" onPress={() => navigation.navigate('AddData', { item: { title: '', description: '', date: '', completed: false }, tableName: 'todos' })} />
         </View>
       </View>
       {items.length > 0 ? items.map((item, index) => {
@@ -288,7 +300,7 @@ function Home({ navigation }) {
             <Button
               key={index + 'b'}
               title="Delete"
-              onPress={() => { deleteData(item.id) }} />
+              onPress={() => { deleteData(item.id, 'todos') }} />
           </View>)
       }) : <Text>nothing is working!!!!</Text>}
     </View>
@@ -296,7 +308,8 @@ function Home({ navigation }) {
 }
 
 function AddData({ navigation, route }) {
-  let [item, setItem] = useState({ title: '', description: '', date: '', completed: false });
+  let [item, setItem] = useState(route.params.item);
+  const keys = Object.keys(item);
   // T: I this this should be a generic function we can create from the local change function and the server change function 
   // The algo should be:
   // 1: Create the  row locally, with a temporary id (something negative should work)
@@ -306,24 +319,26 @@ function AddData({ navigation, route }) {
   // Note, the promise the function returns should complete after the local data is updated, 
   // so we don't keep the user wating
   const createNewData = () => {
-    //createLocalData(item, tableName).then(() => { console.log("Updated local data") });
-    createServerData(item, route.params.tableName).then(res => console.log("Created server data ", res));
+    createLocalData(item, route.params.tableName).then(() => {
+      console.log("Updated local data");
+      createServerData(item, route.params.tableName).then(res => {
+        console.log("Created server data ", res)
+        const db = SQLite.openDatabase('api');
+        db.transaction(tx => {
+          //MAYBE: modified and modifiedDate will be presend on every table that exists in the local db
+          tx.executeSql(`update ${route.params.tableName} set id = ? where id = ${-1}`, [res.row[0].id], (transaction, resultSet) => console.log('updated'), (transaction, err): any => console.log(err))
+        });
+      });
+    });
   }
   return (
     <View style={styles.container}>
-      <Text style={{ fontSize: 35, marginBottom: 50 }}>Edit your data</Text>
-      <TextInput style={styles.inputBox}
-        value={item.title}
-        onChangeText={(event: any) => setItem({ ...item, title: event })}
-        placeholder='Title'></TextInput>
-      <TextInput style={styles.inputBox}
-        value={item.description}
-        onChangeText={(event: any) => setItem({ ...item, description: event })}
-        placeholder='Description'></TextInput>
-      <TextInput style={styles.inputBox}
-        value={item.date}
-        onChangeText={(event: any) => setItem({ ...item, date: event })}
-        placeholder='Date'></TextInput>
+      <Text style={{ fontSize: 35, marginBottom: 50 }}>Add data</Text>
+      {keys.map((keyItem, index) => {
+        if (keyItem !== 'id' && keyItem !== 'completed') {
+          return (<TextInput key={index} style={styles.inputBox} value={item[keyItem]} onChangeText={(event: any) => setItem({ ...item, [keyItem]: event })} placeholder={keyItem} />)
+        }
+      })}
       <Button
         title="Save changes"
         onPress={() => createNewData()}
@@ -335,6 +350,8 @@ function AddData({ navigation, route }) {
 function EditData({ navigation, route }) {
   let [item, setItem] = useState<ITodo>(route.params.item);
   const tableName = route.params.tableName;
+  const keys = Object.keys(item);
+  console.log(keys);
   // T: I this this should be a generic function we can create from the local change function and the server change function 
   // The algo should be:
   // 1: Update local data, and mark the row as locally changed
@@ -344,19 +361,29 @@ function EditData({ navigation, route }) {
   // Note, the promise the function returns should complete after the local data is updated, 
   // so we don't keep the user wating
   const updateData = () => {
-    updateLocalData(item, tableName).then(() => { console.log("Updated local data") });
-    updateServerData(item, tableName).then(res => console.log("Updated server data ", res));
+    console.log(item)
+    updateLocalData(item, tableName).then(() => {
+      console.log("Updated local data");
+      //MAYBE: send the user back to the home page while the server data update is done in the background (?)
+      updateServerData(item, tableName).then(res => {
+        console.log("Updated server data ", res);
+        const db = SQLite.openDatabase('api');
+        db.transaction(tx => {
+          //MAYBE: modified and modifiedDate will be presend on every table that exists in the local db
+          tx.executeSql(`update ${tableName} set modified = ? where id = ${item.id}`, [false], (transaction, resultSet) => console.log('updated'), (transaction, err): any => console.log(err))
+        });
+      });
+    });
   }
 
   return (
     <View style={styles.container}>
       <Text style={{ fontSize: 35, marginBottom: 50 }}>Edit your data</Text>
-      <TextInput style={styles.inputBox}
-        value={item.title}
-        onChangeText={(event: any) => setItem({ ...item, title: event })}></TextInput>
-      <TextInput style={styles.inputBox}
-        value={item.description}
-        onChangeText={(event: any) => setItem({ ...item, description: event })} ></TextInput>
+      {keys.map((key, index) => {
+        if (key !== 'id') {
+          return (<TextInput key={index} style={styles.inputBox} value={item[key]} onChangeText={(event: any) => setItem({ ...item, [key]: event })} />)
+        }
+      })}
       <Button
         title="Save changes"
         onPress={() => updateData()}
