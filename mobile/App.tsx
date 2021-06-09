@@ -12,8 +12,15 @@ function filterData(data: ITodo[], filter: { title?: string }) {
   return data.filter(item => item.title.includes(filter.title))
 }
 
-async function getTodos(filter: Partial<ITodo>) {
-  const response = await fetch('http://localhost:4000/api/todo');
+async function getTodos(filter: Partial<ITodo> & { lastSeenDeletion?: number }) {
+  const url = new URL('api/todo', 'http://localhost:4000');
+  if(filter.title) {
+    url.searchParams.append("title", filter.title);
+  }
+  if(filter.lastSeenDeletion) {
+    url.searchParams.append("lastSeenDeletion", filter.lastSeenDeletion.toString());
+  }
+  const response = await fetch(url.toString());
   let data = await response.json() as ITodo[];
   if (filter.title != null && filter.title !== '') {
     return filterData(data, filter);
@@ -49,6 +56,7 @@ const todoApi =  createSyncFunctions("todos", {
   insert: createServerData,
   update: updateServerData,
   delete: o => deleteServerData(o.id),
+  getDeletions: (lastSeenDeletion) => getTodos({lastSeenDeletion})
 })
 
 function DisplayData(props) {
@@ -101,8 +109,8 @@ async function createServerData(item: ITodo) {
 function Home({ navigation }) {
   const [filterTitle, setFilterTitle] = useState("");
   const { items, loading, errorMessage, reload } = todoApi.useData({
-    // title: filterTitle
-  }, []);
+    title: filterTitle
+  }, [filterTitle]);
 
   return (
     <View style={styles.container}>
@@ -182,6 +190,9 @@ function EditData({ navigation, route }) {
 
 
 function App() {
+  useEffect(() => {
+    todoApi.doSync();
+  })
   return (
     <NavigationContainer>
       <Stack.Navigator>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as SQLite from 'expo-sqlite';
-import { ResultSet, SQLResultSet, SQLTransaction } from "expo-sqlite";
+import { SQLResultSet } from "expo-sqlite";
 
 
 export async function delay(ms: number) {
@@ -36,6 +36,7 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
   delete: (value: SqlObj<C>) => Promise<void>
   get: (filter: Partial<SqlObj<C>>) => Promise<Array<SqlObj<C> & { modifiedDate: number }>>
   getById: (id: SqlObj<C>[PK]) => Promise<SqlObj<C> & { modifiedDate: number }>
+  getDeletions: (lastSeenDeletion: number) => Promise<Array<SqlObj<C> & { modifiedDate: number }>>
 }) {
   columnDefinitions = {
     ...columnDefinitions,
@@ -54,7 +55,7 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
       return await executeSqlOnDb(db, query, args);
     }catch (e) {
       console.log(e);
-      debugger;
+      throw e;
     }
   }
   const columns = Object.keys(columnDefinitions);
@@ -62,6 +63,12 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
   let createTableSql = `
   CREATE TABLE IF NOT EXISTS ${tableName} (
     ${columns.map((key) => `${key} ${columnDefinitions[key]}`).join(', ')}
+  );
+`;
+  let createDeleteHelperTableSql = `
+  CREATE TABLE IF NOT EXISTS lastSeenDeletion (
+    tableName string PRIMARY KEY,
+    lastSeenDeletionTime number
   );
 `;
   const selectQueryById = `SELECT ${columns.join(', ')} from ${tableName} WHERE ${pk} = ?`;
@@ -80,12 +87,41 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     deleteItem,
     insertItem,
     updateItem,
-    useData
+    useData,
+    doSync
   };
   type TItem = SqlObj<C>
   async function createTable() {
-    //await executeSql(`DROP TABLE IF EXISTS ${tableName};`, [])
+    // await executeSql(`DROP TABLE IF EXISTS ${tableName};`, [])
+    // await executeSql(`DROP TABLE IF EXISTS lastSeenDeletion;`, [])
     await executeSql(createTableSql, [])
+    await executeSql(createDeleteHelperTableSql, []);
+    try {
+      await executeSql(`
+      INSERT INTO lastSeenDeletion(tableName,lastSeenDeletionTime)
+        VALUES(?, ?); `, [tableName, Date.now()])
+    } catch(e) {
+      console.log(e);
+    }
+
+    console.log(await executeSql(`select * from lastSeenDeletion`, []))
+  }
+
+  
+  async function syncDeletions() {
+    try {
+      await createDeleteHelperTableSql;
+      const result = await executeSql(`SELECT lastSeenDeletionTime FROM lastSeenDeletion WHERE tableName = ?`, [tableName])
+      console.log("syncDeletions", result.rows.item(0))
+      let lastSeenDeletionTime = result.rows.item(0)["lastSeenDeletionTime"]
+      const deletedItems = await api.getDeletions(lastSeenDeletionTime);
+      await Promise.all(deletedItems.map(hardDeleteLocalData));
+      let maxDate = deletedItems.reduce((v, a)=> Math.max(v, a.modifiedDate), lastSeenDeletionTime);
+      await executeSql(`UPDATE lastSeenDeletion SET lastSeenDeletionTime = ?  WHERE tableName = ?`, [maxDate, tableName])
+      return lastSeenDeletionTime != maxDate;
+    }catch(e) {
+      console.log(e)
+    }
   }
   async function doSync() {
     await createTablePromise;
@@ -101,20 +137,24 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
       if (ongoingOperationCount != 0) continue;
 
       knownFailedItemCount = modifiedData.length;
-
+      console.log(knownFailedItemCount);
       for (let item of modifiedData) {
         if (item['_localModified'] != 1) continue;
-        if (item['_localDelete']) {
-          await api.delete(item)
-          await hardDeleteLocalData(item);
-        } else if (item[pk] < 0) {
-          let serverItem = await api.insert(item);
-          syncLocalItem(item, serverItem);
-        } else {
-          let serverItem = await api.update(item);
-          syncLocalItem(item, serverItem)
+        try {
+          if (item['_localDelete']) {
+            await api.delete(item)
+            await hardDeleteLocalData(item);
+          } else if (item[pk] < 0) {
+            let serverItem = await api.insert(item);
+            syncLocalItem(item, serverItem);
+          } else {
+            let serverItem = await api.update(item);
+            syncLocalItem(item, serverItem)
+          }
+          knownFailedItemCount--;
+        } catch (e) {
+          console.log("Sync failure", e)
         }
-        knownFailedItemCount--;
       }
     }
   }
@@ -127,10 +167,18 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     for (let key of keys) {
       if (filter[key] === undefined) continue;
       switch (columnDefinitions[key]) {
-        case 'string': query += ` AND ${key} like '%' + ? + '%'`; break;
-        default: query += ` AND ${key} = ?`; break;
+        case 'string': 
+          if(filter[key] != "") {
+            query += ` AND ${key} like '%' + ? + '%'`; 
+            params.push(filter[key]);
+          }
+          break;
+        default: 
+          query += ` AND ${key} = ?`;
+          params.push(filter[key]);
+          break;
       }
-      params.push(filter[key]);
+      
     }
     if(unInserted) {
       query += " AND id < 0"
@@ -148,7 +196,7 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     console.log("setLocal", data);
     const finalData = await Promise.all(data.map(async serverItem => {
       let localItemSet = await executeSql(selectQueryById, [serverItem[pk]]);
-      let localItem = localItemSet.rows.length !== 1 ? undefined : localItemSet.rows[0] as TItem;
+      let localItem = localItemSet.rows.length !== 1 ? undefined : localItemSet.rows.item(0) as TItem;
       return await syncLocalItem(localItem, serverItem);
     }));
     return finalData;
@@ -177,6 +225,7 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     await createTablePromise;
 
     const localItem = {
+      _localDelete: 0,
       ...item,
       _localModifiedDate: Date.now(),
       _localModified: isLocalModified ? 1 : 0
@@ -189,18 +238,20 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
   async function insertLocalData(item: TItem, isLocalModified = true) {
     await createTablePromise;
     console.log("insertLocalData");
-    let minId: number = Math.min(0, (await executeSql(selectMinId, [])).rows[0]['minId']);
+    let minId: number = Math.min(0, (await executeSql(selectMinId, [])).rows.item(0)['minId']);
 
     console.log("insertLocalData", minId);
     const localItem = {
       ...item,
       ...(!isLocalModified ? {
         _localModifiedDate: Date.now(),
-        _localModified: 0
+        _localModified: 0,
+        _localDelete: 0,
       } : {
         [pk]: minId - 1,
         _localModifiedDate: Date.now(),
-        _localModified: 1
+        _localModified: 1,
+        _localDelete: 0,
       })
     };
     let params = columns.map(k => localItem[k]);
@@ -269,33 +320,54 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     })();
   }
 
-
   function useData(filter: Partial<TItem>, deps: any[]) {
     const [items, setItems] = useState<TItem[]>([]);
     const [loading, setLoading] = useState(true);
     const serverDataLoading = useRef(true);
+    const generation = useRef(0);
     const [errorMessage, setErrorMessage] = useState<string>();
     const loadData = useCallback(async () => {
       serverDataLoading.current = true;
+      setErrorMessage(null);
       setItems([]);
+      let localGen = ++generation.current;
+
       api.get(filter).then(async (res) => {
         serverDataLoading.current = false;
         const notInserted = getLocal(filter, true);
         const finalResult = await setLocal(res)
+        if(localGen != generation.current) return;
+
         setItems([...await notInserted, ...finalResult]);
         setLoading(false);
-      }, err => setErrorMessage(err));
-
-      getLocal(filter).then((res) => {
-        console.log(res);
-        if (serverDataLoading.current) {
-          setItems(res);
-          setLoading(false);
-        }
       }, err => {
+        if(localGen != generation.current) return;
         setErrorMessage(err)
-        console.log(err);
       });
+
+      syncDeletions().then(hasUpdates => {
+        // If we have something after deletions, get local data again
+        if(hasUpdates) {
+          if (serverDataLoading.current && localGen == generation.current) {
+            fromLocalData();
+          }
+        }
+      });
+
+      function fromLocalData() {
+        getLocal({ ...filter, _localDelete: 0}).then((res) => {
+          if(localGen != generation.current) return;
+          if (serverDataLoading.current) {
+            setItems(res);
+            setLoading(false);
+          }
+        }, err => {
+          if(localGen != generation.current) return;
+          setErrorMessage(err)
+          console.log(err);
+        });
+      }
+      fromLocalData();
     }, deps);
 
     useEffectAsync(loadData, deps);
