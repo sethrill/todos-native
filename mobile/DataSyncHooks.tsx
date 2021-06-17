@@ -13,6 +13,22 @@ function useEffectAsync(fn: () => Promise<void>, deps: any[]) {
   }, deps);
 }
 
+export function createCleanItem<C extends Record<string, V>, V extends string>(columnDefinitions: C, pk: keyof C) {
+
+  type TItem = SqlObj<C>
+  const columns = Object.keys(columnDefinitions) as Array<keyof TItem>;
+  const cleanColumns = columns.filter(o => !excludedColumn.includes(o as keyof PrivateFields));
+  return function cleanItem(item: TItem, includePrimaryKey: boolean) {
+    let result = {} as TItem;
+    for (const key of cleanColumns) {
+      if(key == pk && !includePrimaryKey) continue;
+      if(item[key] == null) continue;
+      result[key] = item[key];
+    }
+    return result;
+  }
+}
+
 export function executeSqlOnDb(db: SQLite.WebSQLDatabase, query: string, args?: any[]): Promise<SQLResultSet> {
   return new Promise<SQLResultSet>((resolve, reject) => {
     db.transaction(tx => tx.executeSql(query, args, (_, result) => {
@@ -21,48 +37,99 @@ export function executeSqlOnDb(db: SQLite.WebSQLDatabase, query: string, args?: 
   });
 }
 
-type SqlObj<T> = {} & {
-  [P in keyof T]:
-  T[P] extends "number" ? number :
-  T[P] extends "string" ? string :
-  T[P] extends "bit" ? 1 | 0 :
-  T[P] extends "date" ? Date :
+export type JsonObject<T> = "object" & { interface: T};
+export function jsonObject<T>(): JsonObject<T> { return "object" as any; }
+export type OptionalJsonObject<T> = "object?" & { interface: T};
+export function optionalJsonObject<T>(): OptionalJsonObject<T> { return "object?" as any; }
+
+type SqlObjProperty<T> = T extends "number" ? number :
+  T extends "integer" ? number :
+  T extends "unsigned big int" ? number :
+  T extends "string" ? string :
+  T extends "text" ? string :
+  T extends "bit" ? 1 | 0 :
+  T extends "boolean" ? boolean :
+  T extends "date" ? Date :
+  T extends JsonObject<infer U> ? U:
+  T extends OptionalJsonObject<infer U> ? U:
+  T extends Optional<infer B> ? SqlObjProperty<B>:
   unknown
+
+type Optional<S extends string> = `${S}?`
+
+function debugLogging(...a: Parameters<typeof console['log']>) {
+  // debugLogging(...a);
 }
+
+export type SqlObj<T extends Record<string, string>> = {} & {
+  -readonly [P in keyof T as T[P] extends Optional<string> ? never : P]:  SqlObjProperty<T[P]>
+} & {
+  -readonly [P in keyof T as T[P] extends Optional<string> ? P : never]?:  SqlObjProperty<T[P]>
+} & {
+  modifiedDate: number
+}
+
+const excludedColumn: Array<keyof PrivateFields> = [ "_localModified", "_localModifiedDate", "_localDelete"];
+type PrivateFields = {
+  _localModified: 0 | 1,
+  _localModifiedDate: number,
+  _localDelete: 0 | 1
+}
+
 // T: Move all sql stuff in here including insert/update/delete so we can cache common sql creation
-export function createSyncFunctions<C extends Record<string, V>, V extends string, PK extends keyof C>(tableName: string, columnDefinitions: C, pk: PK, api: {
+export function createSyncFunctions<C extends Record<string, V>, V extends string, PK extends keyof SqlObj<C>>(tableName: string, columnDefinitions: C, pk: PK, api: {
   insert: (value: SqlObj<C>) => Promise<SqlObj<C>>
   update: (value: SqlObj<C>) => Promise<SqlObj<C>>
   delete: (value: SqlObj<C>) => Promise<void>
   get: (filter: Partial<SqlObj<C>>) => Promise<Array<SqlObj<C> & { modifiedDate: number }>>
   getById: (id: SqlObj<C>[PK]) => Promise<SqlObj<C> & { modifiedDate: number }>
   getDeletions: (lastSeenDeletion: number) => Promise<Array<SqlObj<C> & { modifiedDate: number }>>
+  hydrationMapper?: (item: SqlObj<C>) => SqlObj<C>
 }) {
-  columnDefinitions = {
+  let columnDefinitionsLocal = {
     ...columnDefinitions,
     _localModified: 'bit',
     _localModifiedDate: 'number',
     _localDelete: 'bit'
-  };
-
+  } as Record<keyof SqlObj<C>, string>;
+  let objectColumns = Object.entries(columnDefinitionsLocal).filter(([k, v]) => v === "object" || v === "object?").map(([k, v]) => k);
+  let hydrationMapper = api.hydrationMapper ?? ((o) => o)
+  debugLogging("createSyncFunctions", {
+    columnDefinitionsLocal,
+    objectColumns
+  })
   let knownFailedItemCount = 0;
   let ongoingOperationCount = 0;
 
   const db = SQLite.openDatabase('api');
-  const executeSql = async (query: string, args: any[]) => {
+  const executeSql = async (query: string, args: any[], logWarning = true) => {
     try {
-      console.log("executeSql", { query, args });
+      debugLogging("executeSql", { query, args });
       return await executeSqlOnDb(db, query, args);
     }catch (e) {
-      console.log(e);
+      if(logWarning) {
+        console.warn("!ERROR executeSql", { query, args,  e });
+      }
       throw e;
     }
   }
-  const columns = Object.keys(columnDefinitions);
+  const columns = Object.keys(columnDefinitionsLocal) as Array<keyof TItem>;
   let setLocalQueryPartialQuery = columns.map(() => '?').join(', ');
+  function getType(key: keyof SqlObj<C>) {
+    let type = columnDefinitionsLocal[key];
+    debugLogging({key, type});
+    if(type === "object") type = "text";
+    if(type === "object?") type = "text?";
+
+    let columnDefinition = (type.endsWith('?') ? 
+      `${type.substr(0, type.length - 1)}` : 
+      `${type} NOT NULL`);
+      
+    return columnDefinition + (key == pk ? " PRIMARY KEY" : "");
+  }
   let createTableSql = `
   CREATE TABLE IF NOT EXISTS ${tableName} (
-    ${columns.map((key) => `${key} ${columnDefinitions[key]}`).join(', ')}
+    ${columns.map((key) => `${key} ${getType(key)}`).join(', ')}
   );
 `;
   let createDeleteHelperTableSql = `
@@ -80,7 +147,7 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
       .join(', ')
     } WHERE ${pk} = ?;`
   const deleteQuery = `DELETE FROM ${tableName} WHERE ${pk} = ?;`
-  const createTablePromise = createTable();
+  let createTablePromise = createTable();
   return {
     getLocal,
     setLocal,
@@ -88,31 +155,44 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     insertItem,
     updateItem,
     useData,
-    doSync
+    doSync,
+    getById,
+    clearAllData,
   };
   type TItem = SqlObj<C>
+  type TItemPrivate = TItem & PrivateFields;
   async function createTable() {
     // await executeSql(`DROP TABLE IF EXISTS ${tableName};`, [])
     // await executeSql(`DROP TABLE IF EXISTS lastSeenDeletion;`, [])
+    await unsafeCleanAllData();
     await executeSql(createTableSql, [])
     await executeSql(createDeleteHelperTableSql, []);
     try {
       await executeSql(`
       INSERT INTO lastSeenDeletion(tableName,lastSeenDeletionTime)
-        VALUES(?, ?); `, [tableName, Date.now()])
+        VALUES(?, ?); `, [tableName, Date.now()], false)
     } catch(e) {
-      console.log(e);
     }
 
-    console.log(await executeSql(`select * from lastSeenDeletion`, []))
+    debugLogging(await executeSql(`select * from lastSeenDeletion`, []))
   }
-
-  
+  async function unsafeCleanAllData() {
+    await executeSql(`DROP TABLE IF EXISTS ${tableName}`, []);
+    await executeSql(`DELETE FROM lastSeenDeletion WHERE tableName = ?`, [tableName]);
+  }
+  async function clearAllData() {
+    await createTablePromise;
+    createTablePromise = (async function() {
+      await unsafeCleanAllData();
+      await createTable()
+    })();
+    await createTablePromise;
+  }
   async function syncDeletions() {
     try {
-      await createDeleteHelperTableSql;
+      await createTablePromise;
       const result = await executeSql(`SELECT lastSeenDeletionTime FROM lastSeenDeletion WHERE tableName = ?`, [tableName])
-      console.log("syncDeletions", result.rows.item(0))
+      debugLogging("syncDeletions", result.rows.item(0))
       let lastSeenDeletionTime = result.rows.item(0)["lastSeenDeletionTime"]
       const deletedItems = await api.getDeletions(lastSeenDeletionTime);
       await Promise.all(deletedItems.map(hardDeleteLocalData));
@@ -120,40 +200,48 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
       await executeSql(`UPDATE lastSeenDeletion SET lastSeenDeletionTime = ?  WHERE tableName = ?`, [maxDate, tableName])
       return lastSeenDeletionTime != maxDate;
     }catch(e) {
-      console.log(e)
+      debugLogging(e)
     }
   }
-  async function doSync() {
+  async function doSync(signal: AbortSignal) {
     await createTablePromise;
     knownFailedItemCount += (await getLocal({ "_localModified": 1 } as any)).length;
+    debugLogging(`knownFailedItemCount ${tableName}`, await getLocal({ "_localModified": 1 } as any));
     while (true) {
-      await delay(1000);
+      if (signal.aborted) return;
+      await delay(100);
+      if(knownFailedItemCount !== 0) {
+        debugLogging(`knownFailedItemCount ${tableName}`, knownFailedItemCount);
+      }
+      
       if (!knownFailedItemCount) continue;
       // Do not sync while other operations are ongoing 
       if (ongoingOperationCount != 0) continue;
       const modifiedData = (await getLocal({ "_localModified": 1 } as any));
+      knownFailedItemCount = modifiedData.length;
 
       // Maybe an operation has started. 
       if (ongoingOperationCount != 0) continue;
 
-      knownFailedItemCount = modifiedData.length;
-      console.log(knownFailedItemCount);
-      for (let item of modifiedData) {
+      for (let item of modifiedData as Array<TItemPrivate>) {
+        if (signal.aborted) return;
         if (item['_localModified'] != 1) continue;
         try {
+          console.log("Trying to sync", item);
+          item.modifiedDate = item._localModified;
           if (item['_localDelete']) {
             await api.delete(item)
             await hardDeleteLocalData(item);
           } else if (item[pk] < 0) {
             let serverItem = await api.insert(item);
-            syncLocalItem(item, serverItem);
+            await syncLocalItem(item, serverItem);
           } else {
             let serverItem = await api.update(item);
-            syncLocalItem(item, serverItem)
+            await syncLocalItem(item, serverItem)
           }
           knownFailedItemCount--;
         } catch (e) {
-          console.log("Sync failure", e)
+          debugLogging("Sync failure", e)
         }
       }
     }
@@ -161,13 +249,14 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
 
   async function getLocal(filter: Partial<TItem>, unInserted = false) {
     await createTablePromise;
-    const keys = Object.keys(filter);
+    const keys = Object.keys(filter) as Array<keyof TItem>;
     let query = selectQuery;
     let params = []
     for (let key of keys) {
       if (filter[key] === undefined) continue;
-      switch (columnDefinitions[key]) {
+      switch (columnDefinitionsLocal[key]) {
         case 'string': 
+        case 'string?': 
           if(filter[key] != "") {
             query += ` AND ${key} like '%' + ? + '%'`; 
             params.push(filter[key]);
@@ -183,33 +272,65 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     if(unInserted) {
       query += " AND id < 0"
     }
-    console.log("getLocal ", query, params);
+    debugLogging("getLocal ", query, params);
     let result = await executeSql(query, params);
-    console.log("getLocal query done");
-    let arrayResult = [...result.rows as any] as TItem[];
-    console.table(arrayResult);
+    debugLogging("getLocal query done");
+    let arrayResult = resultToArray(result);
+    debugLogging(`local data ${tableName} (${JSON.stringify(filter)}):`, arrayResult.map(o => o /* [pk] */));
     return arrayResult;
   }
+
+  function resultToArray(sqlResult: SQLResultSet): TItem[] {
+    let result = new Array<TItem>(sqlResult.rows.length);
+    debugLogging("resultToArray", objectColumns);
+    for(let i = 0; i< sqlResult.rows.length; i++) {
+      let obj = sqlResult.rows.item(i)
+      for(let col of objectColumns) {
+        debugLogging("resultToArray", col, obj[col]);
+        let value = obj[col];
+        if(value != null) {
+          obj[col] = JSON.parse(value);
+        }
+      }
+      result[i] =  hydrationMapper(obj);
+    }
+    debugLogging("resultToArray", result);
+    return result
+  }
+
   async function setLocal(data: TItem[]) {
     await createTablePromise;
 
-    console.log("setLocal", data);
+    debugLogging(`setLocal ${tableName}`, data.map(o => o[pk]));
     const finalData = await Promise.all(data.map(async serverItem => {
-      let localItemSet = await executeSql(selectQueryById, [serverItem[pk]]);
-      let localItem = localItemSet.rows.length !== 1 ? undefined : localItemSet.rows.item(0) as TItem;
+      let localItem = await getLocalById(serverItem[pk]);
       return await syncLocalItem(localItem, serverItem);
     }));
     return finalData;
   }
 
-  async function syncLocalItem(localItem: TItem, serverItem: TItem) {
-    console.log("syncLocalItem", {
+  async function getLocalById(id:TItem[PK]) {
+    let localItemSet = await executeSql(selectQueryById, [id]);
+    let localItem = localItemSet.rows.length !== 1 ? undefined : localItemSet.rows.item(0) as TItem;
+    return localItem;
+  }
+
+  async function getById(id: TItem[PK]) {
+    let item = await getLocalById(id);
+    if(item) return item;
+    return api.getById(id);
+  }
+
+  async function syncLocalItem(localItem: TItem | undefined, serverItem: TItem) {
+    const localItemPrivate = localItem as TItemPrivate;
+
+    debugLogging(`syncLocalItem ${tableName}`, {
       localItem,
       serverItem,
-      useLocal: localItem && localItem['_localModified'] && localItem['_localModified'] > serverItem['modified']
+      useLocal: localItem && localItemPrivate._localModified && localItemPrivate._localModified > serverItem.modifiedDate
     });
 
-    if (localItem && localItem['_localModified'] && localItem['_localModified'] > serverItem['modified']) {
+    if (localItem && localItemPrivate._localModified && localItemPrivate._localModified > serverItem.modifiedDate) {
       return localItem;
     } else {
       if (localItem) {
@@ -225,23 +346,31 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     await createTablePromise;
 
     const localItem = {
-      _localDelete: 0,
+      ... { _localDelete: 0 },
       ...item,
       _localModifiedDate: Date.now(),
       _localModified: isLocalModified ? 1 : 0
-    };
-    const params: any[] = columns.map(k => localItem[k])
+    } as TItem;
+    const params: any[] = columns.map(k => dbConvertValue(k, localItem));
     params.push(oldId ?? item[pk]);
-    return await executeSql(updateQuery, params);
+    await executeSql(updateQuery, params);
+    return localItem;
   }
-
+  function dbConvertValue(column: keyof TItem, obj: TItem) {
+    let value = obj[column];
+    if (value === undefined) return null;
+    if(columnDefinitionsLocal[column] === "object" || columnDefinitionsLocal[column] === "object?") {
+      return JSON.stringify(value) as any;
+    }
+    return value as any;
+  }
   async function insertLocalData(item: TItem, isLocalModified = true) {
     await createTablePromise;
-    console.log("insertLocalData");
+    debugLogging("insertLocalData");
     let minId: number = Math.min(0, (await executeSql(selectMinId, [])).rows.item(0)['minId']);
 
-    console.log("insertLocalData", minId);
-    const localItem = {
+    debugLogging("insertLocalData", minId);
+    const localItem: TItem = {
       ...item,
       ...(!isLocalModified ? {
         _localModifiedDate: Date.now(),
@@ -254,7 +383,7 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
         _localDelete: 0,
       })
     };
-    let params = columns.map(k => localItem[k]);
+    let params = columns.map(k => dbConvertValue(k, localItem));
     await executeSql(insertQuery, params);
     return localItem;
   }
@@ -277,28 +406,32 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
         updateLocalData(result, false, item[pk] as number);
       }
       catch (e) {
+        debugLogging("Failed update on", item)
         knownFailedItemCount++;
       }
       finally {
         ongoingOperationCount--;
       }
     })();
+    return item;
   }
   async function updateItem(item: TItem) {
-    await updateLocalData(item);
+    let localItem = await updateLocalData(item);
     ongoingOperationCount++;
     (async function () {
       try {
-        const result = await api.update(item);
+        const result = await (item[pk] < 0 ? api.insert(item) : api.update(item));
         updateLocalData(result, false);
       }
       catch (e) {
+        debugLogging("Failed update on", item)
         knownFailedItemCount++;
       }
       finally {
         ongoingOperationCount--;
       }
     })();
+    return localItem;
   }
 
   async function deleteItem(item: TItem) {
@@ -312,6 +445,7 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
         await hardDeleteLocalData(item);
       }
       catch (e) {
+        debugLogging("Failed delete on", item)
         knownFailedItemCount++;
       }
       finally {
@@ -320,15 +454,19 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
     })();
   }
 
-  function useData(filter: Partial<TItem>, deps: any[]) {
+  function useData({ filter = {}, reloadOnFocus = true }: { 
+    filter?: Partial<TItem>,
+    reloadOnFocus?: boolean,
+  }, deps: any[]) {
     const [items, setItems] = useState<TItem[]>([]);
     const [loading, setLoading] = useState(true);
     const serverDataLoading = useRef(true);
     const generation = useRef(0);
     const [errorMessage, setErrorMessage] = useState<string>();
+
     const loadData = useCallback(async () => {
       serverDataLoading.current = true;
-      setErrorMessage(null);
+      setErrorMessage(undefined);
       setItems([]);
       let localGen = ++generation.current;
 
@@ -364,14 +502,14 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
         }, err => {
           if(localGen != generation.current) return;
           setErrorMessage(err)
-          console.log(err);
+          console.error(err);
         });
       }
       fromLocalData();
     }, deps);
 
     useEffectAsync(loadData, deps);
-
-    return { items, loading, errorMessage, reload: loadData };
+    return { items, loading, errorMessage, reload: loadData, setItems };
   }
+  
 }

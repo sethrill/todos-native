@@ -44,11 +44,11 @@ type ITodo = {
 }
 
 const todoApi =  createSyncFunctions("todos", {
-  "id": "number",
-  "modifiedDate": "number",
-  "title": "string",
+  "id": "integer",
+  "modifiedDate": "unsigned big int",
+  "title": "string?",
   "description": "string",
-  "completed": "bit",
+  "completed": "bit?",
   "date": "date"
 }, "id", {
   get: getTodos,
@@ -109,9 +109,8 @@ async function createServerData(item: ITodo) {
 function Home({ navigation }) {
   const [filterTitle, setFilterTitle] = useState("");
   const { items, loading, errorMessage, reload } = todoApi.useData({
-    title: filterTitle
+    filter: { title: filterTitle}
   }, [filterTitle]);
-
   return (
     <View style={styles.container}>
       <View style={styles.inputContainer}>
