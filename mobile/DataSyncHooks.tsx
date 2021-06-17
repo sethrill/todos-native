@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as SQLite from 'expo-sqlite';
 import { SQLResultSet } from "expo-sqlite";
+import { v4 as uuidv4 } from 'uuid';
 
 
 export async function delay(ms: number) {
@@ -81,9 +82,9 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
   insert: (value: SqlObj<C>) => Promise<SqlObj<C>>
   update: (value: SqlObj<C>) => Promise<SqlObj<C>>
   delete: (value: SqlObj<C>) => Promise<void>
-  get: (filter: Partial<SqlObj<C>>) => Promise<Array<SqlObj<C> & { modifiedDate: number }>>
-  getById: (id: SqlObj<C>[PK]) => Promise<SqlObj<C> & { modifiedDate: number }>
-  getDeletions: (lastSeenDeletion: number) => Promise<Array<SqlObj<C> & { modifiedDate: number }>>
+  get: (filter: Partial<SqlObj<C>>) => Promise<Array<SqlObj<C> & { modifiedDate: number, localId: string }>>
+  getById: (id: SqlObj<C>[PK]) => Promise<SqlObj<C> & { modifiedDate: number, localId: string }>
+  getDeletions: (lastSeenDeletion: number) => Promise<Array<SqlObj<C> & { modifiedDate: number, localId: string }>>
   hydrationMapper?: (item: SqlObj<C>) => SqlObj<C>
 }) {
   let columnDefinitionsLocal = {
@@ -381,6 +382,7 @@ export function createSyncFunctions<C extends Record<string, V>, V extends strin
         _localModifiedDate: Date.now(),
         _localModified: 1,
         _localDelete: 0,
+        _localId: uuidv4()
       })
     };
     let params = columns.map(k => dbConvertValue(k, localItem));

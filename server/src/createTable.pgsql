@@ -5,5 +5,6 @@ create table todos(
     "description"           VARCHAR(100),
     "date" date,
     "modifiedDate" bigint,
-    "isDeleted" boolean DEFAULT FALSE
+    "isDeleted" boolean DEFAULT FALSE,
+    "localId" VARCHAR(100)
 )

@@ -17,13 +17,13 @@ export function routes() {
       pool.query(`UPDATE todos SET 
         "isDeleted" = TRUE
         WHERE id = $1
-        RETURNING "id", "title", "description","date", "modifiedDate"`, 
+        RETURNING "id", "title", "description","date", "modifiedDate"`,
         [id], (error, results) => {
-        if (error) {
-          throw error;
-        }
-        res.status(200).json(results.rows[0]);
-      })
+          if (error) {
+            throw error;
+          }
+          res.status(200).json(results.rows[0]);
+        })
 
       // pool.query('DELETE FROM todos WHERE id = $1 RETURNING *', [id], (error, results) => {
       //   if (error) {
@@ -34,18 +34,18 @@ export function routes() {
     })
     .put((req, res) => {
       const id = parseInt(req.params.id);
-      const { title, description, date} = req.body;
+      const { title, description, date } = req.body;
       console.log(id)
       pool.query(`UPDATE todos SET 
         title = $1, description = $2, date = $3, "modifiedDate" = $4
         WHERE id = $5
-        RETURNING "id", "title", "description","date", "modifiedDate"`, 
+        RETURNING "id", "title", "description","date", "modifiedDate"`,
         [title, description, date, Date.now(), id], (error, results) => {
-        if (error) {
-          throw error;
-        }
-        res.status(200).json(results.rows[0]);
-      })
+          if (error) {
+            throw error;
+          }
+          res.status(200).json(results.rows[0]);
+        })
     })
     .get((req, res) => {
       const id = parseInt(req.params.id)
@@ -57,15 +57,24 @@ export function routes() {
       })
     });
 
-  router.route('/todo') 
+  router.route('/todo')
     .post((req, res) => {
-      const { title, description, date } = req.body;
-      pool.query('INSERT INTO todos (title, description, date, "modifiedDate") VALUES ($1, $2, $3, $4) RETURNING "id", "title", "description","date", "modifiedDate"', 
-        [title, description, date, Date.now()], (error, results) => {
-        if (error) { 
-          throw error;
+      const { title, description, date, localId } = req.body;
+      pool.query(`SELECT "id", "title", "description","date", "modifiedDate" FROM todos WHERE localId = $1`, [localId], (error, results) => {
+        if (error) {
+          throw error
         }
-        res.status(201).json(results.rows[0])
+        if (results.rows) {
+          res.status(200).json(results.rows)
+        } else {
+          pool.query('INSERT INTO todos (title, description, date, "modifiedDate", "localId") VALUES ($1, $2, $3, $4) RETURNING "id", "title", "description","date", "modifiedDate"',
+            [title, description, date, Date.now(), localId], (error, results) => {
+              if (error) {
+                throw error;
+              }
+              res.status(201).json(results.rows[0])
+            })
+        }
       })
     })
     .get((req, res) => {
@@ -74,19 +83,19 @@ export function routes() {
         `SELECT "id", "title", "description","date", "modifiedDate" FROM todos`,
         [] as any[]
       ]
-      if(title) {
-        [query, params]  =[
+      if (title) {
+        [query, params] = [
           query + ` WHERE (title like $1) and ("isDeleted" = FALSE)`,
           ['%' + title + '%']
         ]
       }
       else if (lastSeenDeletion) {
-        [query, params]  =[
+        [query, params] = [
           query + ` WHERE ("modifiedDate" > $1) and ("isDeleted" = TRUE)`,
           [lastSeenDeletion]
         ]
       } else {
-        [query, params]  =[
+        [query, params] = [
           query + ` WHERE "isDeleted" = FALSE`,
           []
         ]
@@ -96,7 +105,7 @@ export function routes() {
           console.log(query, req.query)
           throw error
         }
-        setTimeout( () => {
+        setTimeout(() => {
           res.status(200).json(results.rows)
         }, lastSeenDeletion ? 0 : 10000);
       })
